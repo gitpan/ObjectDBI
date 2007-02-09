@@ -4,11 +4,11 @@ use DBI;
 use DBI::Const::GetInfoType;
 
 use 5.008008;
-our $VERSION = '0.03';
+our $VERSION = '0.05';
 
 =head1 NAME
 
-ObjectDBI - Perl Object Serialization in DBI
+ObjectDBI - Perl Object Serialization in an RDBMS using DBI
 
 =head1 SYNOPSIS
 
@@ -64,7 +64,7 @@ object after the fact of its insertion.
 If you're using a RDBMS that doesn't do sequences OR auto-incrementing,
 then IDs are generated out of thin air.  Be prepared to work with large
 numbers though.  If your RDBMS can't handle those - well, then I'm at
-my wit's end; please provide a 'sequencefnc' to the constructor.
+my wit's end: please provide a 'sequencefnc' to the constructor.
 
 =head1 API
 
@@ -83,6 +83,15 @@ The arguments provide the object with a hash of options, which can be:
   'sequencesql' => Sequence SQL for retrieving a new ID.
   'sequencefnc' => A function ref to be used to retrieve a new ID.
   'overwrite' => Overwrite objects of the same type and name.
+  'chunksize' => A number defining at what length values will get split.
+
+About sequences: the first available method given will be used.  So please
+do yourself a favour, avoid confusion, and use only one of the available
+methods out of 'sequence', 'sequencesql' and 'sequencefnc'.
+
+About chunksize: the default value is 255.  If you set it to zero, that'll
+be interpreted as 'infinite'.  If you set it to anything else, make sure
+it matches the storage size of the 'obj_value' field in the RDBMS.
 
 =cut
 
@@ -109,6 +118,11 @@ sub new {
   $self->{overwrite} = $options{overwrite};
   $self->{dbtype} = $self->{dbh}->get_info($GetInfoType{SQL_DBMS_NAME})
     || 'postgres';
+  if (defined($options{chunksize})) {
+    $self->{chunksize} = $options{chunksize};
+  } else {
+    $self->{chunksize} = 255;
+  }
   bless $self, $classname;
   return $self;
 }
@@ -125,18 +139,17 @@ Returns the ID of the object of the newly created object.
 
 sub put {
   my $self = shift;
-  my $ref = shift;
+  my $ref = shift || die "ObjectDBI->put; Need reference";
   my $name = shift || 'object';
-  my $overwrite = shift || $self->{overwrite};
+  my $overwrite = shift;
+  if (!defined($overwrite)) { $overwrite = $self->{overwrite}; }
   my @ids;
   if ($overwrite) {
     @ids = $self->__objects_find(ref($ref), $name);
   }
   my $id = $self->__put(undef, undef, $name, $ref);
   if ($id) {
-    foreach my $id (@ids) {
-      $self->__del($id);
-    }
+    $self->del_all(@ids);
   }
   return $id;
 }
@@ -173,6 +186,18 @@ sub get {
   my $rows = $self->__object_get($id);
   my $parent = $self->__get_children($rows, undef);
   return $self->__get($rows, $parent->[0]);
+}
+
+=head2 B<my $ref = $objectdb-E<gt>get_meta ($id)>
+
+Returns an array of type and name for an object with given ID.
+
+=cut
+
+sub get_meta {
+  my $self = shift;
+  my $id = shift;
+  return $self->__object_get_meta($id);
 }
 
 =head2 B<my @refs = $objectdbi-E<gt>get_all ($id[,$id..])>
@@ -272,14 +297,14 @@ sub __put {
     }
   } else {
     my $value = "$ref";
-    if (length($value) > 250) {
+    if ($self->{chunksize} && length($value) > $self->{chunksize}) {
       $id = $self->__object_put($pid, $gpid, $name, 'SUBSTR', 'SUBSTR') ||
         return undef;
       if (!defined($gpid)) { $gpid = $id; }
       my $section = 0;
-      while (length($value) > 250) {
-        my $subvalue = substr($value, 0, 250);
-        $value = substr($value, 250);
+      while (length($value) > $self->{chunksize}) {
+        my $subvalue = substr($value, 0, $self->{chunksize});
+        $value = substr($value, $self->{chunksize});
         $self->__object_put($id, $gpid, $section++, undef, $subvalue) ||
           return undef;
       }
@@ -421,6 +446,14 @@ sub __object_get {
   return \@result;
 }
 
+sub __object_get_meta {
+  my $self = shift;
+  my $id = int(shift());
+  return $self->{dbh}->selectrow_array(
+    "select obj_type, obj_name from $self->{objtable} where obj_id=$id"
+  );
+}
+
 sub __object_get_types {
   my $self = shift;
   return $self->{dbh}->selectcol_arrayref(
@@ -557,7 +590,7 @@ More specifically, people using something other than
 Oracle or Postgres must be extra alert for bugs.  Your feedback is appreciated.
 
 When storing long values, the breaking up of them into pieces that are
-250 bytes long impairs search capabilities; fragments that you're looking
+255 bytes long impairs search capabilities; fragments that you're looking
 for might have been broken up.
 
 There is no solution for circular referencing, like Data::Dumper does
