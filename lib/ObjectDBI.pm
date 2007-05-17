@@ -4,7 +4,7 @@ use DBI;
 use DBI::Const::GetInfoType;
 
 use 5.008008;
-our $VERSION = '0.05';
+our $VERSION = '0.06';
 
 =head1 NAME
 
@@ -93,6 +93,9 @@ About chunksize: the default value is 255.  If you set it to zero, that'll
 be interpreted as 'infinite'.  If you set it to anything else, make sure
 it matches the storage size of the 'obj_value' field in the RDBMS.
 
+Also about both sequences and chunksize: in the case of postgres and oracle,
+autodiscovery of these items will be performed in case they're not given.
+
 =cut
 
 sub new {
@@ -116,14 +119,10 @@ sub new {
   $self->{sequencesql} = $options{sequencesql};
   $self->{sequencefnc} = $options{sequencefnc};
   $self->{overwrite} = $options{overwrite};
-  $self->{dbtype} = $self->{dbh}->get_info($GetInfoType{SQL_DBMS_NAME})
-    || 'postgres';
-  if (defined($options{chunksize})) {
-    $self->{chunksize} = $options{chunksize};
-  } else {
-    $self->{chunksize} = 255;
-  }
+  $self->{chunksize} = $options{chunksize};
+  $self->{dbtype} = $self->{dbh}->get_info($GetInfoType{SQL_DBMS_NAME});
   bless $self, $classname;
+  $self->__auto_discover();
   return $self;
 }
 
@@ -168,7 +167,7 @@ sub find {
   return wantarray ? @ids : \@ids;
 }
 
-=head2 B<my $ref = $objectdbi-E<gt>get ($id) or $objectdbi-E<gt>get ($type,$name)>
+=head2 B<my $ref = $objectdbi-E<gt>get ($id) or $objectdbi-E<gt>get ($type, $name)>
 
 Returns the fully deserialized object with the given ID, or
 find the first object that matches type and name.
@@ -188,7 +187,7 @@ sub get {
   return $self->__get($rows, $parent->[0]);
 }
 
-=head2 B<my $ref = $objectdb-E<gt>get_meta ($id)>
+=head2 B<my ($type, $name) = $objectdb-E<gt>get_meta ($id)>
 
 Returns an array of type and name for an object with given ID.
 
@@ -217,6 +216,55 @@ sub get_all {
   return wantarray ? @result : \@result;
 }
 
+=head2 B<my @ids = $objectdbi-E<gt>query ($querystring)>
+
+Queries the database with a specific query string.  The syntax for this
+query 'language' is as follows:
+
+=over
+
+=item
+
+expressions are separated by logical operators ('&&', '||')
+and round braces ('(' and ')') determine precedence.
+
+=item
+
+expressions are made up of a path, and optionally an operator ('==', '!=')
+and a value.
+
+=item
+
+a path is a series of elements, representing hash-keys or array-indexes
+separated by a forward slash ('/').
+
+=item
+
+both paths and values may be enclosed in single or double quotes, so as to
+forego escaping of certain characters or whitespace.
+
+=item
+
+an element can have wildcards (an asterisk ('*')), or be a wildcard in itself.
+
+=item
+
+a back slash escapes all tokens, one character at a time.
+
+=item
+
+outside of quoted strings and path elements, whitespace is ignored.
+
+=back
+
+=cut
+
+sub query {
+  my $self = shift;
+  my $query = shift;
+  return $self->__query($query);
+}
+
 =head2 B<my @types = $objectdbi-E<gt>get_types ()>
 
 Returns a distinct list of all object types known to the database.
@@ -228,7 +276,7 @@ sub get_types {
   return $self->__object_get_types();
 }
 
-=head2 B<$objectdbi-E<gt>del ($id) or $objectdbi-E<gt>del ($type,$name)>
+=head2 B<$objectdbi-E<gt>del ($id) or $objectdbi-E<gt>del ($type, $name)>
 
 Deletes an object by the given ID, or deletes the first object which
 matches type and name.  Returns zero or non zero depending on whether
@@ -376,13 +424,304 @@ sub __del {
   $self->__object_del($id);
 }
 
+sub __query {
+  my $self = shift;
+  my $query = shift;
+  $self->__query_to_sql($query);
+}
+
+sub __tokenize_query {
+  my $query = shift;
+  my $curelt = '';
+  my @tokens;
+  while (length($query)) {
+    if ($query =~ s/^\s+//) {
+      if (length($curelt)) {
+        push @tokens, $curelt;
+        $curelt = '';
+      }
+    }
+    if ($query =~ s/^(!=|==|\(|\)|&&|\|\||\/)//) {
+      if (length($curelt)) {
+        push @tokens, $curelt;
+        $curelt = '';
+      }
+      push @tokens, $1;
+    } elsif ($query =~ s/^([!=\(\)&\|])//) {
+      $curelt .= $1;
+    } elsif ($query =~ s/^(['"])//) {
+      my $delim = $1;
+      if (length($curelt)) {
+        push @tokens, $curelt;
+        $curelt = '';
+      }
+      while ($query =~ s/^([^$delim])//) {
+        my $char = $1;
+        if ($char eq '\\') {
+          $query =~ s/^(.)//s;
+          $curelt .= $1;
+        } else {
+          $curelt .= $char;
+        }
+      }
+      $query =~ s/^.//;
+    } else {
+      while ($query =~ s/^([^!=\(\)&\|\/\s])//) {
+        my $char = $1;
+        if ($char eq '\\') {
+          $query =~ s/^(.)//s;
+          $curelt .= $1;
+        } else {
+          $curelt .= $char;
+        }
+      }
+    }
+  }
+  if (length($curelt)) {
+    push @tokens, $curelt;
+  }
+  return @tokens;
+}
+
+sub __parse_query {
+  my @tokens = @_;
+  my @operators = (
+    '&&',
+    '||',
+    '==',
+    '!=',
+    '/',
+  );
+  foreach my $operator (@operators) {
+    for (my $i=0; $i<scalar(@tokens); $i++) {
+      my $token = $tokens[$i];
+      next if (ref($token));
+      if ($token eq '(') {
+        my $begin = $i;
+        my $level = 1;
+        for (++$i; $i<scalar(@tokens); $i++) {
+          my $token = $tokens[$i];
+          if ($token eq '(') {
+            ++$level;
+          } elsif ($token eq ')') {
+            if (--$level == 0) {
+              my @bracketcontent = splice(@tokens, $begin, 1+$i-$begin);
+              pop @bracketcontent;
+              shift @bracketcontent;
+              my $term = __parse_query(@bracketcontent) || return undef;
+              $tokens[$begin] = $term;
+              $i = $begin;
+              last;
+            }
+          }
+        }
+        if ($level) {
+          return undef; # unmatched brackets
+        }
+      } elsif ($token eq $operator) {
+        my @operand2 = splice(@tokens, $i+1);
+        my @operand1 = splice(@tokens, 0, $i);
+        my $operand1 = __parse_query(@operand1) || return undef;
+        my $operand2 = __parse_query(@operand2) || return undef;
+        return {
+          operator => $operator,
+          operands => [ $operand1, $operand2 ]
+        };
+#      } elsif (!grep(@operators, $token)) {
+#        $tokens[$i] = {
+#          term => $token
+#        };
+      }
+    }
+  }
+  return $tokens[0];
+}
+
+sub __tree_to_sql {
+  my $self = shift;
+  my $parsetree = shift;
+  my $hash = shift;
+  my $postprocess = 0;
+  if (!defined($hash)) {
+    $hash = { n => 1, tables => 1, param => 0, params => {} };
+    $postprocess = 1;
+  } 
+  my $n = $hash->{n};
+  my $result;
+  if ($parsetree->{operator} eq '&&') {
+    $n = $hash->{n} = 1;
+    $result =
+      (my $x = $self->__tree_to_sql($parsetree->{operands}[0], $hash)) .
+      " AND 1=1";
+    $n = $hash->{n} = 1;
+    $result .=
+      (my $x = $self->__tree_to_sql($parsetree->{operands}[1], $hash));
+  } elsif ($parsetree->{operator} eq '||') {
+    $n = $hash->{n} = 1;
+    $result =
+      "((1=1" .
+      (my $x = $self->__tree_to_sql($parsetree->{operands}[0], $hash)) .
+      ") OR (1=1";
+    $n = $hash->{n} = 1;
+    $result .=
+      (my $x = $self->__tree_to_sql($parsetree->{operands}[1], $hash)) .
+      "))";
+  } elsif ($parsetree->{operator} eq '==') {
+    my $operand = "$parsetree->{operands}[1]";
+    my $operator = '=';
+    if ($operand =~ s/\*/\%/g) {
+      $operator = 'like';
+    }
+    $result =
+      (my $x = $self->__tree_to_sql($parsetree->{operands}[0], $hash)) .
+      " AND TABLE$n.obj_value $operator ?$hash->{param}";
+    $hash->{params}{$hash->{param}++} = $operand;
+  } elsif ($parsetree->{operator} eq '!=') {
+    my $operand = "$parsetree->{operands}[1]";
+    my $operator = '<>';
+    if ($operand =~ s/\*/\%/g) {
+      $operator = 'not like';
+    }
+    $result =
+      (my $x = $self->__tree_to_sql($parsetree->{operands}[0], $hash)) .
+      " AND TABLE$n.obj_value $operator ?$hash->{param}";
+    $hash->{params}{$hash->{param}++} = $operand;
+  } elsif ($parsetree->{operator} eq '/') {
+    $result =
+      "TABLE$n.obj_pid " .
+      (my $x = $self->__tree_to_sql($parsetree->{operands}[1], $hash));
+    if (++($hash->{n}) > $hash->{tables}) {
+      $hash->{tables} = $hash->{n};
+    }
+    $result =
+      (my $x = $self->__tree_to_sql($parsetree->{operands}[0], $hash)) .
+      " AND TABLE$hash->{n}.obj_id=$result";
+  } else {
+    my $operand = "$parsetree";
+    my $operator = '=';
+    if ($operand =~ s/\*/\%/g) {
+      $operator = 'like';
+    }
+    $result = " AND TABLE$n.obj_name $operator ?$hash->{param}";
+    $hash->{params}{$hash->{param}++} = $operand;
+  }
+  my @params;
+  if ($postprocess) {
+    my @tables;
+    for (my $i=1; $i<=$hash->{tables}; $i++) {
+      push @tables, "$self->{objtable} TABLE$i";
+    }
+    my $tmp = $result;
+    my $i=0;
+    while ($tmp =~ s/^[^\?]*\?([0-9]+)//) {
+      $params[$i++] = $hash->{params}{$1};
+      $result =~ s/\?$1/?/;
+    }
+    $result =
+      "SELECT DISTINCT(TABLE1.obj_gpid) FROM " . join(',', @tables) .
+      " WHERE $result";
+  }
+  return wantarray ? ($result, @params) : $result;
+}
+
+sub __query_to_sql {
+  my $self = shift;
+  my $query = shift;
+  my @tokens = __tokenize_query($query);
+  my $parsetree = __parse_query(@tokens) || return undef;
+  my ($sql, @params) = $self->__tree_to_sql($parsetree);
+  $sql =~ s/where\s+and/where/i;
+  $sql =~ s/where\s+or/where/i;
+  $sql =~ s/1=1\s+and//i;
+print STDERR "SQL $sql\n" . join(',', @params) . "\n";
+  return $self->__object_select_col($sql, @params);
+}
+
 ##---- dbh stuff -----------------------------------------------------------##
+
+##
+## Function to do some auto discovery on known database types.
+##
+
+sub __auto_discover_postgres {
+  my $self = shift;
+  if (!defined($self->{sequence}) &&
+      !defined($self->{sequencesql}) &&
+      !defined($self->{sequencefnc})) {
+    my $sequences = $self->{dbh}->selectcol_arrayref(
+      "select relname from pg_class where relkind='S'"
+    );
+    if (scalar(@{$sequences})) {
+      $self->{sequence} = $sequences->[0];
+    } else {
+      $self->{dbh}->do("create sequence perlobjectseq");
+      $self->{sequence} = 'perlobjectseq';
+    }
+  }
+  if (!defined($self->{chunksize})) {
+    my $size = $self->{dbh}->selectrow_array(
+      "select attlen from pg_attribute, pg_class" .
+      " where pg_attribute.attrelid=pg_class.oid" .
+      "   and pg_class.relkind='r'" .
+      "   and pg_class.relname='$self->{objtable}'" .
+      "   and pg_attribute.attname='obj_value'"
+    );
+    if ($size <= 0) {
+      $self->{chunksize} = 0;
+    } else {
+      $self->{chunksize} = $size;
+    }
+  }
+}
+
+sub __auto_discover_oracle {
+  my $self = shift;
+  if (!defined($self->{sequence}) &&
+      !defined($self->{sequencesql}) &&
+      !defined($self->{sequencefnc})) {
+    my $sequences = $self->{dbh}->selectcol_arrayref(
+      "SELECT SEQUENCE_NAME FROM USER_SEQUENCES"
+    );
+    if (scalar(@{$sequences})) {
+      $self->{sequence} = $sequences->[0];
+    } else {
+      $self->{dbh}->do("create sequence perlobjectseq");
+      $self->{sequence} = 'perlobjectseq';
+    }
+  }
+  if (!defined($self->{chunksize})) {
+    my $size = $self->{dbh}->selectrow_array(
+      "SELECT DATA_LENGTH FROM USER_TAB_COLUMNS" .
+      " WHERE TABLE_NAME='$self->{objtable}'"
+    );
+    $self->{chunksize} = $size;
+  }
+}
+
+sub __auto_discover_mysql {
+  my $self = shift;
+}
+
+sub __auto_discover {
+  my $self = shift;
+  if ($self->{dbtype} =~ /^(postgresql|postgres|pg|pgsql)$/i) {
+    $self->__auto_discover_postgres();
+  } elsif ($self->{dbtype} =~ /^oracle$/i) {
+    $self->__auto_discover_oracle();
+  } elsif ($self->{dbtype} =~ /^mysql$/i) {
+    $self->__auto_discover_mysql();
+  }
+  if (!defined($self->{chunksize})) {
+    $self->{chunksize} = 255;
+  }
+}
 
 sub __object_select_col {
   my $self = shift;
   my ($sql, @args) = @_;
   my $sth = $self->{dbh}->prepare($sql) || return undef;
   $sth->execute(@args) || return undef;
+  my @result;
   while (my @row = $sth->fetchrow_array) {
     push @result, $row[0];
   }
@@ -484,7 +823,7 @@ sub __object_put_mysql {
 sub __object_put {
   my $self = shift;
   my ($pid, $gpid, $name, $type, $value) = @_;
-  if ($self->{type} =~ /mysql/i) {
+  if ($self->{dbtype} =~ /mysql/i) {
     return $self->__object_put_mysql($pid, $gpid, $name, $type, $value);
   } else {
     my $id = $self->__new_id();
@@ -515,7 +854,7 @@ sub __new_id {
   my $self = shift;
   if ($self->{sequence}) {
     my $sql = "select nextval('$self->{sequence}')";
-    my $type = $self->{type};
+    my $type = $self->{dbtype};
     if ($type =~ /oracle/i) {
       $sql = "SELECT $self->{sequence}.NEXTVAL FROM DUAL";
     } elsif ($type =~ /pg/i || $type =~ /postgres/i) {
@@ -542,6 +881,8 @@ __END__
 
 =head1 SAMPLE USAGE
 
+=head2 Storing and Retrieving
+
   use ObjectDBI;
   use Data::Dumper;
   my $ref = bless({ foo => 'bar' }, 'Foobar');
@@ -554,6 +895,17 @@ __END__
   my $ref2 = $objectdbi->get($id);
   print Dumper($ref2);
 
+=head2 Using Queries
+
+  use ObjectDBI;
+  my $ref = { foo => { bar => 'foobar' }};
+  my $objectdbi = ObjectDBI->new(
+    dbiuri => 'DBI:Pg:dbname=mydb'
+  ) || die "Could not connect to db";
+  $objectdbi->put($ref);
+  my @ids = $objectdbi->query("foo/bar=='foobar' || foo/*='foo*'");
+  print @ids;
+
 =head1 NOTES
 
 =head2 Blessing objects vs. loading modules
@@ -565,10 +917,46 @@ So calling methods on a deserialized object may require you to do some
 additional module usage.  Not loading a module and yet calling a method
 on a blessed reference of it, can lead to cryptic error messages.
 
-=head2 Perl TIE
+=head2 ObjectDBI vs. Perl TIE
 
 This module doesn't implement a perl TIE interface.  There's Tie::DBI for that.
 You could probably re-implement Tie::DBI on top of this module, though.
+
+=head2 ObjectDBI vs. Tangram
+
+I didn't know Tangram existed when I made this module.  Upon brief examination
+of Tangram, I think the differences between ObjectDBI and Tangram are as
+follows:
+
+=over
+
+=item
+
+Tangram is huge.  ObjectDBI is simpler (and more immature).
+
+=item
+
+Tangram is much more geared toward a Tangram-specific query language, while
+ObjectDBI is geared toward storing and searching by name and type.
+ObjectDBI does have a (limited) query language of its own, though.
+
+=item
+
+Tangram stores objects as a whole, which requires potentially unlimited
+storage in a field.  Not all RDBMS supply this feature.
+
+=item
+
+Tangram requires you to specify what values of an object you want stored.
+ObjectDBI has no such limitation and preserves the amorphousness that is
+inherent to the world of perl objects.
+
+=item
+
+ObjectDBI database tables will be a lot bigger statistically than Tangram
+database tables.
+
+=back
 
 =head2 Transactions
 
@@ -584,18 +972,28 @@ Transactions could be implemented as follows:
 
 =head1 BUGS
 
+=over
+
+=item
+
 People using this library with MySQL must extra alert for bugs: I don't
 and won't use it; yet I've written special code for it.
 More specifically, people using something other than
 Oracle or Postgres must be extra alert for bugs.  Your feedback is appreciated.
 
+=item
+
 When storing long values, the breaking up of them into pieces that are
 255 bytes long impairs search capabilities; fragments that you're looking
 for might have been broken up.
 
+=item
+
 There is no solution for circular referencing, like Data::Dumper does
 so elegantly, yet.
 
+=back
+
 =head1 COLOFON
 
-Written by KJ Hermans (kees@pink-frog.com) February 2007.
+Written by KJ Hermans (kees@pink-frog.com) April 2007.
