@@ -4,7 +4,7 @@ use DBI;
 use DBI::Const::GetInfoType;
 
 use 5.008008;
-our $VERSION = '0.06';
+our $VERSION = '0.07';
 
 =head1 NAME
 
@@ -146,7 +146,7 @@ sub put {
   if ($overwrite) {
     @ids = $self->__objects_find(ref($ref), $name);
   }
-  my $id = $self->__put(undef, undef, $name, $ref);
+  my $id = $self->__put(undef, undef, $name, $ref, {});
   if ($id) {
     $self->del_all(@ids);
   }
@@ -184,7 +184,7 @@ sub get {
   }
   my $rows = $self->__object_get($id);
   my $parent = $self->__get_children($rows, undef);
-  return $self->__get($rows, $parent->[0]);
+  return $self->__get($rows, $parent->[0], {});
 }
 
 =head2 B<my ($type, $name) = $objectdb-E<gt>get_meta ($id)>
@@ -325,28 +325,32 @@ sub get_dbh {
 
 sub __put {
   my $self = shift;
-  my ($pid, $gpid, $name, $ref) = @_;
+  my ($pid, $gpid, $name, $ref, $cache) = @_;
   my $type = ref($ref);
   my $id;
-  if (UNIVERSAL::isa($ref, 'ARRAY')) {
+  if (my $cache_id = $cache->{"$ref"}) {
+    $id = $self->__object_put($pid, $gpid, $name, '@@REF', $cache_id);
+  } elsif (UNIVERSAL::isa($ref, 'ARRAY')) {
     $id = $self->__object_put($pid, $gpid, $name, $type, 'ARRAY') ||
       return undef;
+    $cache->{"$ref"} = $id;
     if (!defined($gpid)) { $gpid = $id; }
     for (my $i=0; $i<scalar(@{$ref}); $i++) {
       my $elt = $ref->[$i];
-      return undef if (!$self->__put($id, $gpid, $i, $elt));
+      return undef if (!$self->__put($id, $gpid, $i, $elt, $cache));
     }
   } elsif (UNIVERSAL::isa($ref, 'HASH')) {
+    $cache->{"$ref"} = $id;
     $id = $self->__object_put($pid, $gpid, $name, $type, 'HASH') ||
       return undef;
     if (!defined($gpid)) { $gpid = $id; }
     foreach my $key (keys(%{$ref})) {
-      return undef if (!$self->__put($id, $gpid, $key, $ref->{$key}));
+      return undef if (!$self->__put($id, $gpid, $key, $ref->{$key}, $cache));
     }
   } else {
     my $value = "$ref";
     if ($self->{chunksize} && length($value) > $self->{chunksize}) {
-      $id = $self->__object_put($pid, $gpid, $name, 'SUBSTR', 'SUBSTR') ||
+      $id = $self->__object_put($pid, $gpid, $name, '@@SUBSTR', '') ||
         return undef;
       if (!defined($gpid)) { $gpid = $id; }
       my $section = 0;
@@ -378,6 +382,7 @@ sub __get_children {
       push @result, splice(@{$rows}, $i--, 1);
     }
   }
+  @result = sort { $a->{id} <=> $b->{id} } @result;
   return \@result;
 }
 
@@ -385,26 +390,29 @@ sub __get {
   my $self = shift;
   my $rows = shift;
   my $row = shift;
+  my $cache = shift;
   my $object;
   if ($row->{type} && $row->{value} eq 'ARRAY') {
     $object = [];
+    $cache->{$row->{id}} = $object;
     if ($row->{type} ne $row->{value}) {
       bless $object, $row->{type};
     }
     my $subrows = $self->__get_children($rows, $row->{id});
     foreach my $subrow (@{$subrows}) {
-      $object->[int($subrow->{name})] = $self->__get($rows, $subrow);
+      $object->[int($subrow->{name})] = $self->__get($rows, $subrow, $cache);
     }
   } elsif ($row->{type} && $row->{value} eq 'HASH') {
     $object = {};
+    $cache->{$row->{id}} = $object;
     if ($row->{type} ne $row->{value}) {
       bless $object, $row->{type};
     }
     my $subrows = $self->__get_children($rows, $row->{id});
     foreach my $subrow (@{$subrows}) {
-      $object->{$subrow->{name}} = $self->__get($rows, $subrow);
+      $object->{$subrow->{name}} = $self->__get($rows, $subrow, $cache);
     }
-  } elsif ($row->{type} && $row->{value} eq 'SUBSTR') {
+  } elsif ($row->{type} eq '@@SUBSTR') {
     my $subrows = $self->__get_children($rows, $row->{id});
     my @subrows = sort { $a->{name} <=> $b->{name} } @{$subrows};
     my $value = '';
@@ -412,6 +420,8 @@ sub __get {
       $value .= $subrow->{value};
     }
     return $value;
+  } elsif ($row->{type} eq '@@REF') {
+    return $cache->{$row->{value}};
   } elsif (!defined($row->{type})) {
     return $row->{value};
   }
@@ -633,7 +643,7 @@ sub __query_to_sql {
   $sql =~ s/where\s+and/where/i;
   $sql =~ s/where\s+or/where/i;
   $sql =~ s/1=1\s+and//i;
-print STDERR "SQL $sql\n" . join(',', @params) . "\n";
+#print STDERR "SQL $sql\n" . join(',', @params) . "\n";
   return $self->__object_select_col($sql, @params);
 }
 
@@ -903,8 +913,22 @@ __END__
     dbiuri => 'DBI:Pg:dbname=mydb'
   ) || die "Could not connect to db";
   $objectdbi->put($ref);
-  my @ids = $objectdbi->query("foo/bar=='foobar' || foo/*='foo*'");
+  my @ids = $objectdbi->query("foo/bar=='foobar' || foo/*=='foo*'");
   print @ids;
+
+=head2 Seeing Circular Referencing in Action
+
+  use ObjectDBI;
+  use Data::Dumper;
+  my $objectdbi = ObjectDBI->new(
+    dbiuri => 'DBI:Pg:dbname=mydb'
+  ) || die "Could not connect to db";
+  my $hash = { foo => [ 'bar' ] };
+  $hash->{'foobar'} = $hash->{foo};
+  print Dumper($hash);
+  my $id = $objectdbi->put($hash);
+  my $ref = $objectdbi->get($id);
+  print Dumper($ref);
 
 =head1 NOTES
 
@@ -986,11 +1010,6 @@ Oracle or Postgres must be extra alert for bugs.  Your feedback is appreciated.
 When storing long values, the breaking up of them into pieces that are
 255 bytes long impairs search capabilities; fragments that you're looking
 for might have been broken up.
-
-=item
-
-There is no solution for circular referencing, like Data::Dumper does
-so elegantly, yet.
 
 =back
 
