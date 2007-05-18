@@ -4,7 +4,7 @@ use DBI;
 use DBI::Const::GetInfoType;
 
 use 5.008008;
-our $VERSION = '0.07';
+our $VERSION = '0.08';
 
 =head1 NAME
 
@@ -138,8 +138,8 @@ Returns the ID of the object of the newly created object.
 
 sub put {
   my $self = shift;
-  my $ref = shift || die "ObjectDBI->put; Need reference";
-  my $name = shift || 'object';
+  my $ref = shift;
+  my $name = shift;
   my $overwrite = shift;
   if (!defined($overwrite)) { $overwrite = $self->{overwrite}; }
   my @ids;
@@ -328,7 +328,9 @@ sub __put {
   my ($pid, $gpid, $name, $ref, $cache) = @_;
   my $type = ref($ref);
   my $id;
-  if (my $cache_id = $cache->{"$ref"}) {
+  if (!defined($ref)) {
+    $id = $self->__object_put($pid, $gpid, $name, undef, undef);
+  } elsif (my $cache_id = $cache->{"$ref"}) {
     $id = $self->__object_put($pid, $gpid, $name, '@@REF', $cache_id);
   } elsif (UNIVERSAL::isa($ref, 'ARRAY')) {
     $id = $self->__object_put($pid, $gpid, $name, $type, 'ARRAY') ||
@@ -916,7 +918,7 @@ __END__
   my @ids = $objectdbi->query("foo/bar=='foobar' || foo/*=='foo*'");
   print @ids;
 
-=head2 Seeing Circular Referencing in Action
+=head2 Seeing Cross Referencing in Action
 
   use ObjectDBI;
   use Data::Dumper;
@@ -1015,4 +1017,4 @@ for might have been broken up.
 
 =head1 COLOFON
 
-Written by KJ Hermans (kees@pink-frog.com) April 2007.
+Written by KJ Hermans (kees@pink-frog.com) May 2007.
