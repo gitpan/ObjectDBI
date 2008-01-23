@@ -4,11 +4,11 @@ use DBI;
 use DBI::Const::GetInfoType;
 
 use 5.008008;
-our $VERSION = '0.08';
+our $VERSION = '0.09';
 
 =head1 NAME
 
-ObjectDBI - Perl Object Serialization in an RDBMS using DBI
+ObjectDBI - Perl Object Persistence in an RDBMS using DBI
 
 =head1 SYNOPSIS
 
@@ -23,13 +23,15 @@ RDBMS-es are involved.  The advantage is portability of your project
 is also RDBMS-based), a certain degree of discoverability
 (you can use plain SQL yourself to see what's inside the database), and
 searchability (metadata and data don't get equated).  You must create
-a table for this storage, and the SQL for that is given.
+a table for this storage, and (an idea for) the SQL for that is given below:
 
 =head1 SQL
 
+PostgreSQL or Oracle:
+
   create sequence perlobjectseq;
 
-  create table perlobjects (
+  create table "perlobjects" (
     obj_id integer unique not null,
     obj_pid integer references perlobjects (obj_id),
     obj_gpid integer references perlobjects (obj_id),
@@ -37,6 +39,19 @@ a table for this storage, and the SQL for that is given.
     obj_type varchar(64),
     obj_value varchar(255)
   );
+
+MySQL:
+
+  create table perlobjects (
+    obj_id integer unique not null auto_increment,
+    obj_pid integer references perlobjects (obj_id),
+    obj_gpid integer references perlobjects (obj_id),
+    obj_name varchar(255),
+    obj_type varchar(64),
+    obj_value varchar(255)
+  );
+
+Indexes:
 
   create index ob_name_i on perlobjects (obj_name);
   create index ob_type_i on perlobjects (obj_type);
@@ -141,6 +156,9 @@ sub put {
   my $ref = shift;
   my $name = shift;
   my $overwrite = shift;
+  if (ref($name)) {
+    $name = "$name";
+  }
   if (!defined($overwrite)) { $overwrite = $self->{overwrite}; }
   my @ids;
   if ($overwrite) {
@@ -187,7 +205,7 @@ sub get {
   return $self->__get($rows, $parent->[0], {});
 }
 
-=head2 B<my ($type, $name) = $objectdb-E<gt>get_meta ($id)>
+=head2 B<my ($type, $name) = $objectdbi-E<gt>get_meta ($id)>
 
 Returns an array of type and name for an object with given ID.
 
@@ -199,7 +217,7 @@ sub get_meta {
   return $self->__object_get_meta($id);
 }
 
-=head2 B<my @refs = $objectdbi-E<gt>get_all ($id[,$id..])>
+=head2 B<my @refs = $objectdbi-E<gt>get_all (@ids)>
 
 Auxillary method.
 Returns an array or array reference of objects with the given IDs.
@@ -276,7 +294,7 @@ sub get_types {
   return $self->__object_get_types();
 }
 
-=head2 B<$objectdbi-E<gt>del ($id) or $objectdbi-E<gt>del ($type, $name)>
+=head2 B<my $n = $objectdbi-E<gt>del ($id) or $objectdbi-E<gt>del ($type, $name)>
 
 Deletes an object by the given ID, or deletes the first object which
 matches type and name.  Returns zero or non zero depending on whether
@@ -295,7 +313,7 @@ sub del {
   $self->__del($id);
 }
 
-=head2 B<$objectdbi-E<gt>del_all ($id[,$id..])>
+=head2 B<my $n = $objectdbi-E<gt>del_all (@ids)>
 
 Auxillary method.
 Deletes all objects with given IDs.
@@ -304,10 +322,11 @@ Deletes all objects with given IDs.
 
 sub del_all {
   my $self = shift;
-  my @result;
+  my $n = 0;
   foreach my $id (@_) {
-    $self->del($id);
+    $n += $self->del($id);
   }
+  return $n;
 }
 
 =head2 B<my $dbh = $objectdbi-E<gt>get_dbh ()>
@@ -633,6 +652,9 @@ sub __tree_to_sql {
       "SELECT DISTINCT(TABLE1.obj_gpid) FROM " . join(',', @tables) .
       " WHERE $result";
   }
+  $result =~ s/where\s+and/where/i;
+  $result =~ s/where\s+or/where/i;
+  $result =~ s/1=1\s+and//i;
   return wantarray ? ($result, @params) : $result;
 }
 
@@ -642,9 +664,6 @@ sub __query_to_sql {
   my @tokens = __tokenize_query($query);
   my $parsetree = __parse_query(@tokens) || return undef;
   my ($sql, @params) = $self->__tree_to_sql($parsetree);
-  $sql =~ s/where\s+and/where/i;
-  $sql =~ s/where\s+or/where/i;
-  $sql =~ s/1=1\s+and//i;
 #print STDERR "SQL $sql\n" . join(',', @params) . "\n";
   return $self->__object_select_col($sql, @params);
 }
@@ -887,11 +906,90 @@ sub __new_id {
   }
 }
 
+sub cursor {
+  my $self = shift;
+  my $arg = shift;
+  return ObjectDBI::Cursor->new($self, $arg);
+}
+
+package ObjectDBI::Cursor;
+
+=head1 CURSORS
+
+Cursors are there to obtain lists of objects in a 'streaming' (as opposed
+to 'buffered') fashion.  When the list of objects is (potentially) too long
+to retrieve all at once, you'd use a cursor and iterate through it.
+
+=head2 B<my $cursor = $objectdbi-E<gt>cursor($optional_query);>
+
+or
+
+=head2 B<my $cursor = ObjectDBI::Cursor-E<gt>new($objectdbi, $optional_query);>
+
+Usage:
+
+  my $cursor = $objectdbi->cursor("foo");
+  while (my $ref = $cursor->next()) {
+    print Dumper($ref);
+  }
+
+=cut
+
+sub new {
+  my $class = shift;
+  my $objectdbi = shift;
+  if (!UNIVERSAL::isa($objectdbi, 'ObjectDBI')) {
+    die "Need ObjectDBI reference as argument";
+  }
+  my $classname = ref($class) || $class; 
+  my $self = {
+    OBJECTDBI => $objectdbi,
+  };
+  bless $self, $classname;
+  my $sql = "select min(obj_gpid) from $objectdbi->{objtable}";
+  my @params;
+  if (scalar(@_)) {
+    my $query = shift;
+    my @tokens = ObjectDBI::__tokenize_query($query);
+    my $parsetree = ObjectDBI::__parse_query(@tokens) || return undef;
+    ($sql, @params) = $self->{OBJECTDBI}->__tree_to_sql($parsetree);
+    $self->{SQL} = $sql;
+    $self->{PARAMS} = \@params;
+    $sql =~ s/^SELECT DISTINCT/SELECT MIN/;
+  }
+  $self->{ID} = $objectdbi->get_dbh()->selectrow_array($sql, undef, @params);
+  return $self;
+}
+
+sub next {
+  my $self = shift;
+  return undef if (!defined($self->{ID}));
+  my $result = $self->{OBJECTDBI}->get($self->{ID});
+  my $sql =
+    "select min(obj_gpid) from $objectdbi->{objtable}" .
+    " where obj_gpid > $self->{ID}";
+  my @params;
+  if ($self->{SQL}) {
+    $sql = $self->{SQL};
+    @params = @{$self->{PARAMS}};
+    $sql =~ s/^SELECT DISTINCT/SELECT MIN/;
+    $sql .= " AND TABLE1.obj_gpid > $self->{ID}";
+  }
+  $self->{ID} = $self->{OBJECTDBI}->get_dbh()->selectrow_array(
+    $sql, undef, @params
+  );
+  return $result;
+}
+
 1;
 
 __END__
 
 =head1 SAMPLE USAGE
+
+Below are a few code examples demonstrating this package's usage.
+They assume various databases on localhost; please adapt according to
+your configuration.
 
 =head2 Storing and Retrieving
 
@@ -973,9 +1071,9 @@ storage in a field.  Not all RDBMS supply this feature.
 
 =item
 
-Tangram requires you to specify what values of an object you want stored.
-ObjectDBI has no such limitation and preserves the amorphousness that is
-inherent to the world of perl objects.
+Tangram requires you to specify what values of an object you want stored for
+searching.  ObjectDBI has no such limitation and preserves the amorphousness
+that is inherent to the world of perl objects.
 
 =item
 
@@ -996,6 +1094,10 @@ Transactions could be implemented as follows:
     $objectdbi->get_dbh()->rollback();
   }
 
+=head1 DEPENDENCIES
+
+DBI => 1.3
+
 =head1 BUGS
 
 =over
@@ -1009,8 +1111,8 @@ Oracle or Postgres must be extra alert for bugs.  Your feedback is appreciated.
 
 =item
 
-When storing long values, the breaking up of them into pieces that are
-255 bytes long impairs search capabilities; fragments that you're looking
+When storing long values, the breaking up of them into pieces
+impairs search capabilities; fragments that you're looking
 for might have been broken up.
 
 =back
