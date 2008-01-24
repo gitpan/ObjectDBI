@@ -4,7 +4,7 @@ use DBI;
 use DBI::Const::GetInfoType;
 
 use 5.008008;
-our $VERSION = '0.09';
+our $VERSION = '0.10';
 
 =head1 NAME
 
@@ -933,6 +933,9 @@ Usage:
     print Dumper($ref);
   }
 
+Bear in mind that the query given when initializing the cursor is optional.
+When no query is given, you simply iterate through the entire set of objects.
+
 =cut
 
 sub new {
@@ -1056,7 +1059,7 @@ follows:
 
 =item
 
-Tangram is huge.  ObjectDBI is simpler (and more immature).
+Tangram is huge.  ObjectDBI is simpler (and more immature, probably).
 
 =item
 
@@ -1072,13 +1075,13 @@ storage in a field.  Not all RDBMS supply this feature.
 =item
 
 Tangram requires you to specify what values of an object you want stored for
-searching.  ObjectDBI has no such limitation and preserves the amorphousness
+searching.  ObjectDBI has no such limitations and preserves the amorphousness
 that is inherent to the world of perl objects.
 
 =item
 
-ObjectDBI database tables will be a lot bigger statistically than Tangram
-database tables.
+ObjectDBI database tables will be a lot bigger (as in: more rows) statistically
+than Tangram database tables (which will have bigger rows).
 
 =back
 
@@ -1117,6 +1120,32 @@ for might have been broken up.
 
 =back
 
+=head1 TODO
+
+=over
+
+=item 
+
+Break my head over that breaking up of long values.  I can't just concatenate
+a random amount of strings to work with in SQL, so I'm thinking perhaps
+having a backend perl stored procedure.  But that would do away with using
+this library in any other way than with postgres.  Ah, I'm stuck with it.
+
+=item 
+
+Implement a debug mode, where all SQL and all objects make it to STDERR.
+
+=back
+
+=head1 CHANGELOG
+
+This changelog is incomplete was only started in the transition from
+ObjectDBI-0.08 to ObjectDBI-0.09
+
+0.09 Added queries to cursors.  Fixed the sql logic in __tree_to_sql.
+
+0.10 Added two tests - hey !  I know how to make tests now !
+
 =head1 COLOFON
 
-Written by KJ Hermans (kees@pink-frog.com) May 2007.
+Written by KJ Hermans (kees@pink-frog.com) Jan 2008.
