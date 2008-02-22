@@ -4,7 +4,7 @@ use DBI;
 use DBI::Const::GetInfoType;
 
 use 5.008008;
-our $VERSION = '0.10';
+our $VERSION = '0.11';
 
 =head1 NAME
 
@@ -802,16 +802,26 @@ sub __objects_find {
 sub __object_get {
   my $self = shift;
   my $id = int(shift());
-  my $sth = $self->{dbh}->prepare(
-    'select obj_id as "id", obj_pid as "pid", obj_gpid as "gpid",' .
-    ' obj_name as "name", obj_type as "type", obj_value as "value"' .
-    " from $self->{objtable} where obj_gpid=$id" .
-    " order by obj_pid, obj_id"
-  ) || return undef;
-  $sth->execute() || return undef;
+  my $sql =
+    'select obj_id, obj_pid, obj_gpid,' .
+    ' obj_name, obj_type, obj_value' .
+    " from $self->{objtable} where obj_gpid='$id'" .
+    " order by obj_pid, obj_id";
+  my $rows = $self->{dbh}->selectall_arrayref($sql);
+  if (!scalar(@{$rows})) {
+    return undef;
+  }
   my @result;
-  while (my $row = $sth->fetchrow_hashref()) {
-    push @result, $row;
+  foreach my $row (@{$rows}) {
+    my $hash = {
+      id => $row->[0],
+      pid => $row->[1],
+      gpid => $row->[2],
+      name => $row->[3],
+      type => $row->[4],
+      value => $row->[5],
+    };
+    push @result, $hash;
   }
   return \@result;
 }
@@ -1145,6 +1155,14 @@ ObjectDBI-0.08 to ObjectDBI-0.09
 0.09 Added queries to cursors.  Fixed the sql logic in __tree_to_sql.
 
 0.10 Added two tests - hey !  I know how to make tests now !
+
+0.11 Skip those tests, unless you're running SQL::Statement and MLDBM, or
+a Postgres DB called perlobjects.  This kind of defies the purpose of testing.
+Also, simplified the 'get object' query, so that more primitive databases can
+handle the SQL.  Should take care of that for all queries.  Strictly on
+demand though, although I can imagine that the kind of queries you can
+fabricate using the query parser, can be a bit much for any top-notch
+SQL optimizer.
 
 =head1 COLOFON
 
