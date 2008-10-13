@@ -1,5 +1,5 @@
-#!/usr/bin/perl -I../lib
 
+use lib '../lib';
 use ObjectDBI;
 use Data::Dumper;
 

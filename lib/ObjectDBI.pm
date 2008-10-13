@@ -4,7 +4,7 @@ use DBI;
 use DBI::Const::GetInfoType;
 
 use 5.008008;
-our $VERSION = '0.11';
+our $VERSION = '0.12';
 
 =head1 NAME
 
@@ -1164,6 +1164,10 @@ demand though, although I can imagine that the kind of queries you can
 fabricate using the query parser, can be a bit much for any top-notch
 SQL optimizer.
 
+0.12 Changed the test scripts at the behest of Slaven Rezic.  I'm really
+sorry for wasting everyone's time with this, but the whole 'testing' thing
+is still a bit foreign to me.
+
 =head1 COLOFON
 
-Written by KJ Hermans (kees@pink-frog.com) Jan 2008.
+Written by KJ Hermans (kees@pink-frog.com) Oct 2008.

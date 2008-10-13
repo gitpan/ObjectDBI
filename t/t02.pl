@@ -1,7 +1,9 @@
-#!/usr/bin/perl -I../lib
 
+use lib '../lib';
 use ObjectDBI;
 use Data::Dumper;
+
+#unshift @INC, '../lib';
 
 sub no_test {
   print "1..1\nok 1 Skipped # SKIP No database available\n";

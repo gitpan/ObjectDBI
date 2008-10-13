@@ -1,2 +1,2 @@
-#!/usr/bin/perl
-system("t/t02.pl");
+
+system $^X, "-Mblib", "t/t02.pl"
