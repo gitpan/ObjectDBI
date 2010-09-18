@@ -4,7 +4,7 @@ use DBI;
 use DBI::Const::GetInfoType;
 
 use 5.008008;
-our $VERSION = '0.12';
+our $VERSION = '0.14';
 
 =head1 NAME
 
@@ -53,9 +53,11 @@ MySQL:
 
 Indexes:
 
-  create index ob_name_i on perlobjects (obj_name);
-  create index ob_type_i on perlobjects (obj_type);
-  create index ob_value_i on perlobjects (obj_value);
+  create index perlobjects_name_i on perlobjects (obj_name);
+  create index perlobjects_type_i on perlobjects (obj_type);
+  create index perlobjects_value_i on perlobjects (obj_value);
+  create index perlobjects_pid_i on perlobjects (obj_pid);
+  create index perlobjects_gpid_i on perlobjects (obj_gpid);
 
 Now before y'all start shouting;
 obviously, given your particular type of RDBMS, your mileage may vary
@@ -88,17 +90,18 @@ my wit's end: please provide a 'sequencefnc' to the constructor.
 Returns a blessed instance of this module.
 The arguments provide the object with a hash of options, which can be:
 
-  'dbh' => DBI database handle
-  'dbiuri' => DBI database connection URI
-  'dbiuser' => DBI database connection user
-  'dbipass' => DBI database connection password
-  'dbioptions' => DBI database connection options
-  'table' => Table name used ('perlobjects' is the default)
+  'dbh' => DBI database handle.
+  'dbiuri' => DBI database connection URI.
+  'dbiuser' => DBI database connection user.
+  'dbipass' => DBI database connection password.
+  'dbioptions' => DBI database connection options.
+  'table' => Table name used ('perlobjects' is the default).
   'sequence' => Sequence name for easily retrieving new IDs.
   'sequencesql' => Sequence SQL for retrieving a new ID.
   'sequencefnc' => A function ref to be used to retrieve a new ID.
   'overwrite' => Overwrite objects of the same type and name.
   'chunksize' => A number defining at what length values will get split.
+  'debug' => Setting it at anything will make STDERR a busy stream.
 
 About sequences: the first available method given will be used.  So please
 do yourself a favour, avoid confusion, and use only one of the available
@@ -136,6 +139,7 @@ sub new {
   $self->{overwrite} = $options{overwrite};
   $self->{chunksize} = $options{chunksize};
   $self->{dbtype} = $self->{dbh}->get_info($GetInfoType{SQL_DBMS_NAME});
+  $self->{debug} = $options{debug};
   bless $self, $classname;
   $self->__auto_discover();
   return $self;
@@ -205,7 +209,7 @@ sub get {
   return $self->__get($rows, $parent->[0], {});
 }
 
-=head2 B<my ($type, $name) = $objectdbi-E<gt>get_meta ($id)>
+=head2 B<my ($type, $name, $id) = $objectdbi-E<gt>get_meta ($id)>
 
 Returns an array of type and name for an object with given ID.
 
@@ -655,6 +659,9 @@ sub __tree_to_sql {
   $result =~ s/where\s+and/where/i;
   $result =~ s/where\s+or/where/i;
   $result =~ s/1=1\s+and//i;
+  if ($self->{debug}) {
+    print STDERR "SQL: '$result' with params: '" . join("', '", @params) . "\n";
+  }
   return wantarray ? ($result, @params) : $result;
 }
 
@@ -664,7 +671,6 @@ sub __query_to_sql {
   my @tokens = __tokenize_query($query);
   my $parsetree = __parse_query(@tokens) || return undef;
   my ($sql, @params) = $self->__tree_to_sql($parsetree);
-#print STDERR "SQL $sql\n" . join(',', @params) . "\n";
   return $self->__object_select_col($sql, @params);
 }
 
@@ -736,11 +742,20 @@ sub __auto_discover_mysql {
 sub __auto_discover {
   my $self = shift;
   if ($self->{dbtype} =~ /^(postgresql|postgres|pg|pgsql)$/i) {
+    if ($self->{debug}) {
+      print STDERR "AUTODISCOVER PostgreSQL backend.\n";
+    }
     $self->__auto_discover_postgres();
   } elsif ($self->{dbtype} =~ /^oracle$/i) {
     $self->__auto_discover_oracle();
+    if ($self->{debug}) {
+      print STDERR "AUTODISCOVER Oracle backend.\n";
+    }
   } elsif ($self->{dbtype} =~ /^mysql$/i) {
     $self->__auto_discover_mysql();
+    if ($self->{debug}) {
+      print STDERR "AUTODISCOVER MySQL backend.\n";
+    }
   }
   if (!defined($self->{chunksize})) {
     $self->{chunksize} = 255;
@@ -785,6 +800,9 @@ sub __objects_search {
   my $sql =
     "select distinct(obj_gpid) from $self->{objtable} where " . 
     join(" and ", @cond);
+  if ($self->{debug}) {
+    print STDERR "SQL '$sql' with params '" . join("', '", @args) . "'\n";
+  }
   my @ids = $self->__object_select_col($sql, @args);
   return @ids;
 }
@@ -795,6 +813,9 @@ sub __objects_find {
   my $sql =
     "select obj_id from $self->{objtable}" .
     " where obj_gpid=obj_id and obj_type=? and obj_name=?";
+  if ($self->{debug}) {
+    print STDERR "SQL '$sql' with params '$type', '$name'\n";
+  }
   my @ids = $self->__object_select_col($sql, $type, $name);
   return wantarray ? @ids : $ids[0];
 }
@@ -807,6 +828,9 @@ sub __object_get {
     ' obj_name, obj_type, obj_value' .
     " from $self->{objtable} where obj_gpid='$id'" .
     " order by obj_pid, obj_id";
+  if ($self->{debug}) {
+    print STDERR "SQL '$sql'\n";
+  }
   my $rows = $self->{dbh}->selectall_arrayref($sql);
   if (!scalar(@{$rows})) {
     return undef;
@@ -829,27 +853,35 @@ sub __object_get {
 sub __object_get_meta {
   my $self = shift;
   my $id = int(shift());
-  return $self->{dbh}->selectrow_array(
-    "select obj_type, obj_name from $self->{objtable} where obj_id=$id"
-  );
+  my $sql =
+    "select obj_type, obj_name, obj_id from $self->{objtable} where obj_id=$id";
+  if ($self->{debug}) {
+    print STDERR "SQL '$sql'\n";
+  }
+  return $self->{dbh}->selectrow_array($sql);
 }
 
 sub __object_get_types {
   my $self = shift;
-  return $self->{dbh}->selectcol_arrayref(
-    "select distinct(obj_type) from $self->{objtable} where obj_gpid=obj_id"
-  );
+  my $sql =
+    "select distinct(obj_type) from $self->{objtable} where obj_gpid=obj_id";
+  if ($self->{debug}) {
+    print STDERR "SQL '$sql'\n";
+  }
+  return $self->{dbh}->selectcol_arrayref($sql);
 }
 
 sub __object_put_mysql {
   my $self = shift;
   my ($pid, $gpid, $name, $type, $value) = @_;
-  if ($self->{dbh}->do(
+  my $sql =
     "insert into $self->{objtable}" .
     " (obj_pid, obj_gpid, obj_name, obj_type, obj_value)" .
-    " values (?,?,?,?,?)"
-    , undef, $pid, $gpid, $name, $type, $value
-  )) {
+    " values (?,?,?,?,?)";
+  if ($self->{debug}) {
+    print STDERR "SQL '$sql' with params '" . join("', '", @_) . "'\n";
+  }
+  if ($self->{dbh}->do($sql, undef, @_)) {
     my $id = $self->{dbh}->do("select last_insert_id()");
     if (!defined($gpid)) {
       $self->{dbh}->do(
@@ -868,12 +900,17 @@ sub __object_put {
     return $self->__object_put_mysql($pid, $gpid, $name, $type, $value);
   } else {
     my $id = $self->__new_id();
-    if ($self->{dbh}->do(
+    my $sql =
       "insert into $self->{objtable}" .
       " (obj_id, obj_pid, obj_gpid, obj_name, obj_type, obj_value)" .
-      " values (?,?,?,?,?,?)"
-      , undef, $id, $pid, (defined($gpid) ? $gpid : $id), $name, $type, $value
-    )) {
+      " values (?,?,?,?,?,?)";
+    my @params = (
+      $id, $pid, (defined($gpid) ? $gpid : $id), $name, $type, $value
+    );
+    if ($self->{debug}) {
+      print STDERR "SQL '$sql' with params '" . join("', '", @params) . "'\n";
+    }
+    if ($self->{dbh}->do($sql, undef, @params)) {
       return $id;
     } else {
       return undef;
@@ -884,9 +921,11 @@ sub __object_put {
 sub __object_del {
   my $self = shift;
   my $id = int(shift());
-  $self->{dbh}->do(
-    "delete from $self->{objtable} where obj_gpid=?", undef, $id
-  );
+  my $sql = "delete from $self->{objtable} where obj_gpid=?";
+  if ($self->{debug}) {
+    print STDERR "SQL '$sql' with params '$id'\n";
+  }
+  $self->{dbh}->do($sql, undef, $id);
 } 
 
 my $count = 0;
@@ -918,8 +957,7 @@ sub __new_id {
 
 sub cursor {
   my $self = shift;
-  my $arg = shift;
-  return ObjectDBI::Cursor->new($self, $arg);
+  return ObjectDBI::Cursor->new($self, @_);
 }
 
 package ObjectDBI::Cursor;
@@ -930,11 +968,11 @@ Cursors are there to obtain lists of objects in a 'streaming' (as opposed
 to 'buffered') fashion.  When the list of objects is (potentially) too long
 to retrieve all at once, you'd use a cursor and iterate through it.
 
-=head2 B<my $cursor = $objectdbi-E<gt>cursor($optional_query);>
+=head2 B<my $cursor = $objectdbi-E<gt>cursor([query], [type]);>
 
 or
 
-=head2 B<my $cursor = ObjectDBI::Cursor-E<gt>new($objectdbi, $optional_query);>
+=head2 B<my $cursor = ObjectDBI::Cursor-E<gt>new($objectdbi, [query], [type]);>
 
 Usage:
 
@@ -959,18 +997,30 @@ sub new {
     OBJECTDBI => $objectdbi,
   };
   bless $self, $classname;
-  my $sql = "select min(obj_gpid) from $objectdbi->{objtable}";
+  my $sql =
+    "SELECT DISTINCT(TABLE1.obj_gpid)" .
+    " from $objectdbi->{objtable} as TABLE1 where 1=1";
   my @params;
-  if (scalar(@_)) {
-    my $query = shift;
+  $self->{PARAMS} = \@params;
+  if (defined($_[0])) {
+    my $query = $_[0];
     my @tokens = ObjectDBI::__tokenize_query($query);
     my $parsetree = ObjectDBI::__parse_query(@tokens) || return undef;
     ($sql, @params) = $self->{OBJECTDBI}->__tree_to_sql($parsetree);
-    $self->{SQL} = $sql;
-    $self->{PARAMS} = \@params;
-    $sql =~ s/^SELECT DISTINCT/SELECT MIN/;
+    $self->{QUERY} = $query;
   }
-  $self->{ID} = $objectdbi->get_dbh()->selectrow_array($sql, undef, @params);
+  if (defined($_[1])) {
+    my $type = $_[1];
+    $sql .= ' AND TABLE1.OBJ_TYPE=?';
+    push @params, $type;
+  }
+  $self->{SQL} = $sql;
+  $sql =~ s/^SELECT DISTINCT/SELECT MIN/;
+  if ($self->{OBJECTDBI}{debug}) {
+    print STDERR "SQL: '$sql' with params: '" . join("', '", @params) . "\n";
+  }
+  $self->{ID} =
+    $objectdbi->get_dbh()->selectrow_array($sql, undef, @params);
   return $self;
 }
 
@@ -978,15 +1028,201 @@ sub next {
   my $self = shift;
   return undef if (!defined($self->{ID}));
   my $result = $self->{OBJECTDBI}->get($self->{ID});
-  my $sql =
-    "select min(obj_gpid) from $objectdbi->{objtable}" .
-    " where obj_gpid > $self->{ID}";
-  my @params;
-  if ($self->{SQL}) {
-    $sql = $self->{SQL};
-    @params = @{$self->{PARAMS}};
-    $sql =~ s/^SELECT DISTINCT/SELECT MIN/;
-    $sql .= " AND TABLE1.obj_gpid > $self->{ID}";
+  my @params = @{$self->{PARAMS}};
+  my $sql = $self->{SQL};
+  $sql =~ s/^SELECT DISTINCT/SELECT MIN/;
+  $sql .= " AND TABLE1.obj_gpid > $self->{ID}";
+  if ($self->{OBJECTDBI}{debug}) {
+    print STDERR "SQL: '$sql' with params: '" . join("', '", @params) . "'\n";
+  }
+  $self->{ID} = $self->{OBJECTDBI}->get_dbh()->selectrow_array(
+    $sql, undef, @params
+  );
+  return $result;
+}
+
+=head2 B<my $err = $cursor-E<gt>skip($amount);>
+
+or
+
+=head2 B<my $err = $cursor-E<gt>skip_forward($amount);>
+
+Skips this many places in the cursor.
+
+=cut
+
+sub skip {
+  my $self = shift;
+  return $self->skip_forward(@_);
+}
+
+sub skip_forward {
+  my $self = shift;
+  return undef if (!defined($self->{ID}));
+  my $amount = int(shift(@_));
+  my @params = @{$self->{PARAMS}};
+  my $sql = $self->{SQL};
+#  $sql =~ s/^SELECT DISTINCT/SELECT MIN/;
+  $sql .= " AND TABLE1.obj_gpid > $self->{ID}";
+  $sql .= " ORDER BY TABLE1.obj_gpid ASC";
+
+## POSTGRES SPECIFIC
+  $sql .= " LIMIT $amount";
+
+  if ($self->{OBJECTDBI}{debug}) {
+    print STDERR "SQL: '$sql' with params: '" . join("', '", @params) . "'\n";
+  }
+  my $ids = $self->{OBJECTDBI}->get_dbh()->selectcol_arrayref(
+    $sql, undef, @params
+  );
+  $self->{ID} = $ids->[ $amount - 1 ];
+  return 1;
+}
+
+=head2 B<my $err = $cursor-E<gt>skip_backward($amount);>
+
+Skips this many places in the cursor in the opposite direction.
+
+=cut
+
+sub skip_backward {
+  my $self = shift;
+  return undef if (!defined($self->{ID}));
+  my $amount = int(shift(@_));
+  my @params = @{$self->{PARAMS}};
+  my $sql = $self->{SQL};
+#  $sql =~ s/^SELECT DISTINCT/SELECT MAX/;
+  $sql .= " AND TABLE1.obj_gpid < $self->{ID}";
+  $sql .= " ORDER BY TABLE1.obj_gpid DESC";
+
+## POSTGRES SPECIFIC
+  $sql .= " LIMIT $amount";
+
+  if ($self->{OBJECTDBI}{debug}) {
+    print STDERR "SQL: '$sql' with params: '" . join("', '", @params) . "'\n";
+  }
+  my $ids = $self->{OBJECTDBI}->get_dbh()->selectcol_arrayref(
+    $sql, undef, @params
+  );
+  $self->{ID} = $ids->[ $amount - 1 ];
+  return 1;
+}
+
+=head2 B<my $err = $cursor-E<gt>first();>
+
+Move to the first possible position of the cursor.
+Doesn't need to be called when your previous call is $cursor->new(),
+because a new cursor is always at its first possible position.
+
+=cut
+
+sub first {
+  my $self = shift;
+  my @params = @{$self->{PARAMS}};
+  my $sql = $self->{SQL};
+  $sql =~ s/^SELECT DISTINCT/SELECT MIN/;
+  if ($self->{OBJECTDBI}{debug}) {
+    print STDERR "SQL: '$sql' with params: '" . join("', '", @params) . "\n";
+  }
+  $self->{ID} =
+    $self->{OBJECTDBI}->get_dbh()->selectrow_array(
+      $sql, undef, @{$self->{PARAMS}}
+    );
+  return 1;
+}
+
+=head2 B<my $err = $cursor-E<gt>last();>
+
+Move to the last possible position of the cursor.
+
+=cut
+
+sub last {
+  my $self = shift;
+  my $sql = $self->{SQL};
+  my @params = @{$self->{PARAMS}};
+  my $sql = $self->{SQL};
+  $sql =~ s/^SELECT DISTINCT/SELECT MAX/;
+  if ($self->{OBJECTDBI}{debug}) {
+    print STDERR "SQL: '$sql' with params: '" . join("', '", @params) . "\n";
+  }
+  $self->{ID} =
+    $self->{OBJECTDBI}->get_dbh()->selectrow_array(
+      $sql, undef, @{$self->{PARAMS}}
+    );
+  return 1;
+}
+
+=head2 B<my $ref = $cursor-E<gt>next();>
+
+Move to the next position of the cursor.  Returns the object at the current
+position.
+
+=head2 B<my $ref = $cursor-E<gt>prev();>
+
+Move to the previous position of the cursor.  Returns the object at the current
+position.
+
+=head2 B<my $ref = $cursor-E<gt>current();>
+
+Returns the object at the current position.
+
+=head2 B<my ($name, $type, $id) = $cursor-E<gt>meta_data();>
+
+Returns the meta data (name, type, id) of the object at the current position.
+
+=cut
+
+sub prev {
+  my $self = shift;
+  return undef if (!defined($self->{ID}));
+  my $result = $self->{OBJECTDBI}->get($self->{ID});
+  my @params = @{$self->{PARAMS}};
+  $sql = $self->{SQL};
+  $sql =~ s/^SELECT DISTINCT/SELECT MAX/;
+  $sql .= " AND TABLE1.obj_gpid < $self->{ID}";
+  if ($self->{OBJECTDBI}{debug}) {
+    print STDERR "SQL: '$sql' with params: '" . join("', '", @params) . "'\n";
+  }
+  $self->{ID} = $self->{OBJECTDBI}->get_dbh()->selectrow_array(
+    $sql, undef, @params
+  );
+  return $result;
+}
+
+sub current {
+  my $self = shift;
+  return undef if (!defined($self->{ID}));
+  my $result = $self->{OBJECTDBI}->get($self->{ID});
+  return $result;
+}
+
+sub meta_data {
+  my $self = shift;
+  return undef if (!defined($self->{ID}));
+  return $self->{OBJECTDBI}->__object_get_meta($self->{ID});
+}
+
+=head2 B<my $ref = $cursor-E<gt>del();>
+
+Deletes the current element under the cursor and moves to cursor one up.
+A small concurrency warning is in order here: when two conncurrent users use
+cursors, and one of them start to manipulate the state of the db, the other
+one *might* risk suddenly dropping out of it.
+
+=cut
+
+sub del {
+  my $self = shift;
+  return undef if (!defined($self->{ID}));
+  my $result = $self->{OBJECTDBI}->get($self->{ID});
+  $self->{OBJECTDBI}->__del($self->{ID});
+  my @params = @{$self->{PARAMS}};
+  my $sql = $self->{SQL};
+  $sql =~ s/^SELECT DISTINCT/SELECT MIN/;
+  $sql .= " AND TABLE1.obj_gpid > $self->{ID}";
+  if ($self->{OBJECTDBI}{debug}) {
+    print STDERR "SQL: '$sql' with params: '" . join("', '", @params) . "'\n";
   }
   $self->{ID} = $self->{OBJECTDBI}->get_dbh()->selectrow_array(
     $sql, undef, @params
@@ -1141,10 +1377,6 @@ a random amount of strings to work with in SQL, so I'm thinking perhaps
 having a backend perl stored procedure.  But that would do away with using
 this library in any other way than with postgres.  Ah, I'm stuck with it.
 
-=item 
-
-Implement a debug mode, where all SQL and all objects make it to STDERR.
-
 =back
 
 =head1 CHANGELOG
@@ -1167,6 +1399,11 @@ SQL optimizer.
 0.12 Changed the test scripts at the behest of Slaven Rezic.  I'm really
 sorry for wasting everyone's time with this, but the whole 'testing' thing
 is still a bit foreign to me.
+
+0.13 Implemented debugging of SQL statements.  A beginning is made.
+Also, adjusted test 2 to be self sufficient.
+
+0.14 Lots more cursor functionality.
 
 =head1 COLOFON
 

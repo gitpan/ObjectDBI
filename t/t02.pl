@@ -11,7 +11,7 @@ sub no_test {
 }
 
 my $objectdbi = eval{ ObjectDBI->new(
-  dbiuri => 'dbi:Pg:dbname=perlobjects'
+  dbiuri => 'dbi:Pg:dbname=perlobjects', debug => 1
 ) } || no_test();
 
 $objectdbi->get_dbh()->do("
@@ -30,6 +30,16 @@ $objectdbi->get_dbh()->do("
 ");
 
 print "1..1\n";
+
+my $hash = { foo => [ 'bar' ] };
+$hash->{'foobar'} = $hash->{foo};
+my $str1 = Dumper($hash);
+my $id = $objectdbi->put($hash);
+my $ref = $objectdbi->get($id);
+my $str2 = Dumper($ref);
+if ($str1 ne $str2) {
+  print "not ok 1\n";
+}
 
 my $n=0;
 my $cursor = $objectdbi->cursor("foo");
