@@ -1,6 +1,7 @@
 
 use lib '../lib';
 use ObjectDBI;
+use DBD::CSV;
 use Data::Dumper;
 
 sub no_test {
@@ -8,19 +9,34 @@ sub no_test {
   exit;
 }
 
-eval("use SQL::Statement;1;") || no_test();
-my $objectdbi = eval {
-  ObjectDBI->new(dbiuri => 'dbi:DBM:mldbm=Storable')
-} || no_test();
+my $dir = "/tmp/dbd_csv";
+
+`rm -rf $dir`;
+mkdir $dir || no_test();
+
+my $dbh = DBI->connect("dbi:CSV:", "", "", {
+  f_dir => $dir
+}) || no_test();
+
+my $seq = 1;
+sub seq {
+  return $seq++;
+}
+
+my $objectdbi = ObjectDBI->new(
+  dbh => $dbh,
+  sequencefnc => 'main::seq',
+#  debug => 1,
+) || no_test();
 
 $objectdbi->get_dbh()->do("
   create table perlobjects (
-    obj_id text,
-    obj_pid text,
-    obj_gpid text,
-    obj_name text,
-    obj_type text,
-    obj_value text
+    obj_id integer,
+    obj_pid integer,
+    obj_gpid integer,
+    obj_name char(255),
+    obj_type char(255),
+    obj_value char(255)
   )
 ");
 
@@ -38,5 +54,9 @@ if ($str1 eq $str2) {
 }
 
 $objectdbi->get_dbh()->do("drop table perlobjects");
+
+$dbh->disconnect();
+
+`rm -rf $dir`;
 
 1;

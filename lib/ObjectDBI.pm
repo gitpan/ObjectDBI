@@ -4,7 +4,7 @@ use DBI;
 use DBI::Const::GetInfoType;
 
 use 5.008008;
-our $VERSION = '0.14';
+our $VERSION = '0.15';
 
 =head1 NAME
 
@@ -333,6 +333,51 @@ sub del_all {
   return $n;
 }
 
+=head2 B<my $n = $objectdbi-E<gt>count ([type], [query])>
+
+Returns the amount of objects that answer to these conditions.
+
+=cut
+
+sub count {
+  my $self = shift;
+  my ($type, $query);
+  if (defined($_[0])) {
+    $type = $_[0];
+  }
+  if (defined($_[1])) {
+    $query = $_[1];
+  }
+  my @params;
+  my $sql =
+    "SELECT DISTINCT(TABLE1.obj_gpid)" .
+    " from $self->{objtable} as TABLE1 where 1=1";
+  if ($query) {
+    my @tokens = ObjectDBI::__tokenize_query($query);
+    my $parsetree = ObjectDBI::__parse_query(@tokens) || return undef;
+    ($sql, @params) = $self->__tree_to_sql($parsetree);
+  }
+  if ($type) {
+    $sql =
+      "SELECT DISTINCT(obj_gpid)" .
+      " FROM $self->{objtable}" .
+      " WHERE obj_type=?" .
+      " AND obj_pid is null" .
+      " INTERSECT " .
+      $sql;
+    unshift @params, $type;
+  }
+#  $sql =~ s/^SELECT DISTINCT/SELECT COUNT/;
+  $sql = "SELECT COUNT(obj_gpid) FROM ($sql) FOO";
+  if ($self->{debug}) {
+    print STDERR "SQL: '$sql' with params: '" . join("', '", @params) . "'\n";
+  }
+  my $result = $self->get_dbh()->selectrow_array(
+    $sql, undef, @params
+  );
+  return $result;
+}
+
 =head2 B<my $dbh = $objectdbi-E<gt>get_dbh ()>
 
 Returns the DBI database handle.
@@ -359,7 +404,8 @@ sub __put {
     $id = $self->__object_put($pid, $gpid, $name, $type, 'ARRAY') ||
       return undef;
     $cache->{"$ref"} = $id;
-    if (!defined($gpid)) { $gpid = $id; }
+#    if (!defined($gpid)) { $gpid = $id; }
+    if (!length($gpid)) { $gpid = $id; }
     for (my $i=0; $i<scalar(@{$ref}); $i++) {
       my $elt = $ref->[$i];
       return undef if (!$self->__put($id, $gpid, $i, $elt, $cache));
@@ -368,7 +414,8 @@ sub __put {
     $cache->{"$ref"} = $id;
     $id = $self->__object_put($pid, $gpid, $name, $type, 'HASH') ||
       return undef;
-    if (!defined($gpid)) { $gpid = $id; }
+#    if (!defined($gpid)) { $gpid = $id; }
+    if (!length($gpid)) { $gpid = $id; }
     foreach my $key (keys(%{$ref})) {
       return undef if (!$self->__put($id, $gpid, $key, $ref->{$key}, $cache));
     }
@@ -377,7 +424,8 @@ sub __put {
     if ($self->{chunksize} && length($value) > $self->{chunksize}) {
       $id = $self->__object_put($pid, $gpid, $name, '@@SUBSTR', '') ||
         return undef;
-      if (!defined($gpid)) { $gpid = $id; }
+#      if (!defined($gpid)) { $gpid = $id; }
+      if (!length($gpid)) { $gpid = $id; }
       my $section = 0;
       while (length($value) > $self->{chunksize}) {
         my $subvalue = substr($value, 0, $self->{chunksize});
@@ -390,7 +438,8 @@ sub __put {
     } else {
       $id = $self->__object_put($pid, $gpid, $name, undef, "$ref") ||
         return undef;
-      if (!defined($gpid)) { $gpid = $id; }
+#      if (!defined($gpid)) { $gpid = $id; }
+      if (!length($gpid)) { $gpid = $id; }
     }
   }
   return $id;
@@ -447,7 +496,8 @@ sub __get {
     return $value;
   } elsif ($row->{type} eq '@@REF') {
     return $cache->{$row->{value}};
-  } elsif (!defined($row->{type})) {
+#  } elsif (!defined($row->{type})) {
+  } elsif (!length($row->{type})) {
     return $row->{value};
   }
   return wantarray ? ($object, $row->{name}) : $object;
@@ -883,7 +933,8 @@ sub __object_put_mysql {
   }
   if ($self->{dbh}->do($sql, undef, @_)) {
     my $id = $self->{dbh}->do("select last_insert_id()");
-    if (!defined($gpid)) {
+#    if (!defined($gpid)) {
+    if (!length($gpid)) {
       $self->{dbh}->do(
         "update $self->{objtable} set obj_gpid=$id where obj_id=$id"
       );
@@ -905,7 +956,8 @@ sub __object_put {
       " (obj_id, obj_pid, obj_gpid, obj_name, obj_type, obj_value)" .
       " values (?,?,?,?,?,?)";
     my @params = (
-      $id, $pid, (defined($gpid) ? $gpid : $id), $name, $type, $value
+#      $id, $pid, (defined($gpid) ? $gpid : $id), $name, $type, $value
+      $id, $pid, (length($gpid) ? $gpid : $id), $name, $type, $value
     );
     if ($self->{debug}) {
       print STDERR "SQL '$sql' with params '" . join("', '", @params) . "'\n";
@@ -1011,11 +1063,18 @@ sub new {
   }
   if (defined($_[1])) {
     my $type = $_[1];
-    $sql .= ' AND TABLE1.OBJ_TYPE=?';
-    push @params, $type;
+    $sql =
+      "SELECT DISTINCT(obj_gpid)" .
+      " FROM $objectdbi->{objtable}" .
+      " WHERE obj_type=?" .
+      " AND obj_pid is null" .
+      " INTERSECT " .
+      $sql;
+    unshift @params, $type;
   }
   $self->{SQL} = $sql;
-  $sql =~ s/^SELECT DISTINCT/SELECT MIN/;
+#  $sql =~ s/^SELECT DISTINCT/SELECT MIN/;
+  $sql = "SELECT MIN(obj_gpid) FROM ($sql) FOO";
   if ($self->{OBJECTDBI}{debug}) {
     print STDERR "SQL: '$sql' with params: '" . join("', '", @params) . "\n";
   }
@@ -1030,8 +1089,9 @@ sub next {
   my $result = $self->{OBJECTDBI}->get($self->{ID});
   my @params = @{$self->{PARAMS}};
   my $sql = $self->{SQL};
-  $sql =~ s/^SELECT DISTINCT/SELECT MIN/;
   $sql .= " AND TABLE1.obj_gpid > $self->{ID}";
+#  $sql =~ s/^SELECT DISTINCT/SELECT MIN/;
+  $sql = "SELECT MIN(obj_gpid) FROM ($sql) FOO";
   if ($self->{OBJECTDBI}{debug}) {
     print STDERR "SQL: '$sql' with params: '" . join("', '", @params) . "'\n";
   }
@@ -1064,7 +1124,7 @@ sub skip_forward {
   my $sql = $self->{SQL};
 #  $sql =~ s/^SELECT DISTINCT/SELECT MIN/;
   $sql .= " AND TABLE1.obj_gpid > $self->{ID}";
-  $sql .= " ORDER BY TABLE1.obj_gpid ASC";
+  $sql = " SELECT obj_gpid FROM ($sql) FOO ORDER BY obj_gpid ASC";
 
 ## POSTGRES SPECIFIC
   $sql .= " LIMIT $amount";
@@ -1093,7 +1153,8 @@ sub skip_backward {
   my $sql = $self->{SQL};
 #  $sql =~ s/^SELECT DISTINCT/SELECT MAX/;
   $sql .= " AND TABLE1.obj_gpid < $self->{ID}";
-  $sql .= " ORDER BY TABLE1.obj_gpid DESC";
+  $sql = " SELECT obj_gpid FROM ($sql) FOO ORDER BY obj_gpid DESC";
+#  $sql .= " ORDER BY TABLE1.obj_gpid DESC";
 
 ## POSTGRES SPECIFIC
   $sql .= " LIMIT $amount";
@@ -1120,7 +1181,8 @@ sub first {
   my $self = shift;
   my @params = @{$self->{PARAMS}};
   my $sql = $self->{SQL};
-  $sql =~ s/^SELECT DISTINCT/SELECT MIN/;
+  $sql = "SELECT MIN(obj_gpid) FROM ($sql) FOO";
+#  $sql =~ s/^SELECT DISTINCT/SELECT MIN/;
   if ($self->{OBJECTDBI}{debug}) {
     print STDERR "SQL: '$sql' with params: '" . join("', '", @params) . "\n";
   }
@@ -1142,7 +1204,8 @@ sub last {
   my $sql = $self->{SQL};
   my @params = @{$self->{PARAMS}};
   my $sql = $self->{SQL};
-  $sql =~ s/^SELECT DISTINCT/SELECT MAX/;
+#  $sql =~ s/^SELECT DISTINCT/SELECT MAX/;
+  $sql = "SELECT MAX(obj_gpid) FROM ($sql) FOO";
   if ($self->{OBJECTDBI}{debug}) {
     print STDERR "SQL: '$sql' with params: '" . join("', '", @params) . "\n";
   }
@@ -1179,8 +1242,9 @@ sub prev {
   my $result = $self->{OBJECTDBI}->get($self->{ID});
   my @params = @{$self->{PARAMS}};
   $sql = $self->{SQL};
-  $sql =~ s/^SELECT DISTINCT/SELECT MAX/;
   $sql .= " AND TABLE1.obj_gpid < $self->{ID}";
+#  $sql =~ s/^SELECT DISTINCT/SELECT MAX/;
+  $sql = "SELECT MAX(obj_gpid) FROM ($sql) FOO";
   if ($self->{OBJECTDBI}{debug}) {
     print STDERR "SQL: '$sql' with params: '" . join("', '", @params) . "'\n";
   }
@@ -1219,8 +1283,9 @@ sub del {
   $self->{OBJECTDBI}->__del($self->{ID});
   my @params = @{$self->{PARAMS}};
   my $sql = $self->{SQL};
-  $sql =~ s/^SELECT DISTINCT/SELECT MIN/;
   $sql .= " AND TABLE1.obj_gpid > $self->{ID}";
+  $sql = "SELECT MIN(obj_gpid) FROM ($sql) FOO";
+#  $sql =~ s/^SELECT DISTINCT/SELECT MIN/;
   if ($self->{OBJECTDBI}{debug}) {
     print STDERR "SQL: '$sql' with params: '" . join("', '", @params) . "'\n";
   }
@@ -1407,4 +1472,4 @@ Also, adjusted test 2 to be self sufficient.
 
 =head1 COLOFON
 
-Written by KJ Hermans (kees@pink-frog.com) Oct 2008.
+Written by KJ Hermans (kees@pink-frog.com) Sep 2010.

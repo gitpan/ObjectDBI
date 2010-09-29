@@ -6,5 +6,3 @@ lib/ObjectDBI.pm
 META.yml                                 Module meta-data (added by MakeMaker)
 t/t01.t
 t/t01.pl
-t/t02.t
-t/t02.pl
